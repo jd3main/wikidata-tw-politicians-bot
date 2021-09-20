@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+apicache-py3/
+
+# This project
+votedata/
