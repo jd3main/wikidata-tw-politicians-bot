@@ -1,37 +1,49 @@
 from pprint import pprint
-import pandas as pd
+import copy
 import code
 import os
 import tkinter as tk
 import tkinter.filedialog
 import itertools
+from typing import List, Dict, Tuple
+import time
+
+import pandas as pd
+
+from pywikibot import (
+    Site,
+    ItemPage,
+    Claim,
+    WbTime,
+    WbQuantity,
+)
+from pywikibot.site import DataSite
+from pywikibot.data.api import LoginManager
+from pywikibot.page._collections import (
+    LanguageDict,
+    ClaimCollection,
+)
 
 from wikidataintegrator import wdi_core, wdi_login
-from wikidataintegrator.wdi_core import (
-    WDItemEngine as _WDItemEngine,
-    WDItemID,
-    WDQuantity,
-    WDTime,
-    WDString,
-)
 
 from .election_data import ElectionData, Gender, District, Candidate
-from .wd_utils import (
-    make_statments_dict,
-    item_id,
-    entity_url,
-)
 from .wbsearch import wbsearch
 from .entity_ids import ItemIds, PropertyIds
-from .wb_time_utils import WbTimePrecision, time_wdi_to_pwb
+from .wb_time_utils import WbTimePrecision, time_match
 from .get_label import get_zhtw_label
-from .adaptive_entity_engine import AdaptiveWDEntityEngine
+from .adaptive_entity import AdaptiveEntity
+from .wd_utils import (
+    entity_url,
+    make_claim,
+    find_claim,
+    set_claim,
+)
 
 
 # Constants
 NO_PARTY = '999'
 REFERENCE_URL = 'https://data.gov.tw/dataset/13119'
-DATA_RETRIEVED_DATE = '+2020-09-07T00:00:00Z'
+DATA_RETRIEVED_TIME = WbTime.fromTimestr('+2020-09-07T00:00:00Z', WbTimePrecision.DAY)
 WD_URL = 'https://www.wikidata.org'
 WD_API_URL = 'https://www.wikidata.org/w/api.php'
 TEST_WD_URL = 'https://test.wikidata.org'
@@ -40,173 +52,20 @@ TEST_WD_API_URL = 'https://test.wikidata.org/w/api.php'
 ELECTORAL_DISTRICT_OPTIONS = ['行政區', '區域立委', '山地立委', '平地立委', '其他']
 
 
+WD_SITE:DataSite = Site('wikidata','wikidata')
+TEST_WD_SITE:DataSite = Site('test','wikidata')
+
+MAIN_P = PropertyIds(WD_SITE)
+
 IS_TEST = True
 SITE_URL = ''
 API_URL = ''
-LOGIN = None
+SITE = None
 
 P = None
 Q = None
 
-ItemEngine = _WDItemEngine
-
-entity_id_of_party = dict()
-def load_party_mapping(filename):
-    df = pd.read_csv(filename, header=None)
-    for row in df.iloc:
-        party_id = row[0]
-        entityId = row[1]
-        entity_id_of_party[party_id] = entityId
-
-
-def get_district_item_id(district:District, district_type:str, login_instance=None):
-
-    if district_type not in ELECTORAL_DISTRICT_OPTIONS:
-        raise ValueError(f'district_type should be one of {ELECTORAL_DISTRICT_OPTIONS}')
-
-    if district_type == '行政區':
-        data = [WDString(district.code.HRCIS_str(), P.ELECTORAL_DISTRICT)]
-        return AdaptiveWDEntityEngine(login_instance, data=data, core_props={P.ELECTORAL_DISTRICT})
-        
-    elif district_type == '區域立委':
-        search_results = wbsearch(district.name, dict_id_label=True)
-        if len(search_results) == 0:
-            return None
-        result = search_results[0]
-        id = result['id']
-        return AdaptiveWDEntityEngine.get_adapted_entity_id(login_instance, id)
-    
-    elif district_type == '山地立委':
-        return Q.HIGHLAND_ABORIGINE_DISTRICT
-
-    elif district_type == '平地立委':
-        return Q.LOWLAND_ABORIGINE_DISTRICT
-
-    elif district_type == '其他':
-        return None
-
-
-def same_person_confidence(item, cand:Candidate) -> int:
-    confidence = 1
-
-    _, item_label = get_zhtw_label(item)
-    if item_label != cand.legal_name:
-        return 0
-    
-    statements = make_statments_dict(item.statements)
-    
-    if P.CBDB_ID in statements:
-        return 0
-
-    if P.INSTANCE_OF in statements:
-        values = [f'Q{stm.value}' for stm in statements[P.INSTANCE_OF]]
-        if Q.HUMAN not in values:
-            return 0
-
-    if P.DATE_OF_BIRTH in statements:
-        item_birth_date = time_wdi_to_pwb(statements.get(P.DATE_OF_BIRTH)[0])
-        precision = min(item_birth_date.precision, cand.birth_date.precision)
-
-        if precision >= WbTimePrecision.YEAR and item_birth_date.year != cand.birth_date.year:
-            return 0
-        if precision >= WbTimePrecision.MONTH and item_birth_date.month != cand.birth_date.month:
-            return 0
-        if precision >= WbTimePrecision.DAY and item_birth_date.day != cand.birth_date.day:
-            return 0
-
-        confidence += (precision - WbTimePrecision.YEAR + 1)
-
-    if P.GENDER in statements:
-        values = [f'Q{stm.id}' for stm in statements[P.GENDER]]
-
-        item_is_male = Q.MALE in values
-        item_is_female = Q.FEMALE in values
-
-        if cand.gender == Gender.MALE:
-            if item_is_male:
-                confidence += 0.5
-            if item_is_female:
-                confidence -= 0.5
-        if cand.gender == Gender.FEMALE:
-            if item_is_female:
-                confidence += 0.5
-            if item_is_male:
-                confidence -= 0.5
-
-        item_gender = statements[P.GENDER][0]
-        if item_gender.value == int(Q.MALE[1:]):
-            item_gender = Gender.MALE
-        elif item_gender.value == int(Q.FEMALE[1:]):
-            item_gender = Gender.FEMALE
-        
-        if item_gender != cand.gender:
-            return 0
-        else:
-            confidence += 0.5
-
-    if P.NATIONALITY in statements:
-        values = [f'Q{stm.value}' for stm in statements[P.NATIONALITY]]
-        if Q.TAIWAN in values:
-            confidence += 0.5
-        else:
-            confidence -= 1
-
-    if P.OCCUPATION in statements:
-        for stm in statements[P.OCCUPATION]:
-            occupation = stm.value
-            if occupation == Q.POLITICIAN:
-                confidence += 0.5
-                break
-
-    if P.PARTY_MEMBERSHIP in statements:
-        confidence += 0.1
-
-    return confidence
-
-
-def initialize(is_test=True):
-    global IS_TEST
-    global SITE_URL
-    global API_URL
-    global ItemEngine
-    global LOGIN
-    global Q
-    global P
-
-    IS_TEST = is_test
-    if IS_TEST:
-        SITE_URL = TEST_WD_URL
-        API_URL = TEST_WD_API_URL
-    else:
-        SITE_URL = WD_URL
-        API_URL = WD_API_URL
-
-    ItemEngine = _WDItemEngine.wikibase_item_engine_factory(API_URL)
-    
-    # Login
-    WDUSER = os.getenv("WDUSER")
-    WDPASS = os.getenv("WDPASS")
-    
-    if WDUSER is None:
-        raise ValueError('Environment variable "WDUSER" is required.')
-    if WDPASS is None:
-        raise ValueError('Environment variable "WDPASS" is required.')
-    
-    LOGIN = wdi_login.WDLogin(
-        user = WDUSER,
-        pwd = WDPASS,
-        mediawiki_api_url = API_URL,
-        mediawiki_index_url = SITE_URL,
-    )
-
-    Q = ItemIds(LOGIN)
-    P = PropertyIds(LOGIN)
-
-
-    print(f'-------------------------')
-    print(f'Account: {WDUSER}')
-    print(f'IS_TEST: {IS_TEST}')
-    print(f'-------------------------')
+ModificationList = List[Tuple[ItemPage,Dict]]
 
 
 
@@ -214,22 +73,29 @@ def main(is_test=True, head=None):
 
     initialize(is_test)
 
-    # Hide default window
     root = tk.Tk()
+    root.overrideredirect(True)
+    root.geometry('0x0+0+0')
     root.withdraw()
-
+    
 
     print(f'-----------------------------')
     print(f'請選擇匯入來源')
-    dir_name = tk.filedialog.askdirectory(title='匯入來源', mustexist=True, initialdir=os.getcwd())
+    # force the window to show on top once
+    root.wm_attributes('-topmost', 1)
+    root.deiconify()
+    root.lift()
+    root.wm_attributes('-topmost', 0)
+
+    dir_name = tk.filedialog.askdirectory(parent=root, title='匯入來源', mustexist=True, initialdir=os.getcwd())
+    root.withdraw()
     print(f'匯入自：{dir_name}')
     print(f'-----------------------------')
 
     while True:
         input_election_entity_id = input('輸入該選舉的 Wikidata ID: ')
-        election_entity = AdaptiveWDEntityEngine.get_adapted_entity(LOGIN, input_election_entity_id)
-        election_entity_id = election_entity.wd_item_id
-        print(f'{get_zhtw_label(election_entity)[1]} ({entity_url(SITE_URL, election_entity_id)})')
+        election_entity = AdaptiveEntity(SITE, input_election_entity_id)
+        print(f'{get_zhtw_label(election_entity)} ({entity_url(SITE_URL, election_entity.getID())})')
         confirm = input('是否正確？ (Y/n)').upper()
         if confirm == 'N':
             continue
@@ -262,15 +128,15 @@ def main(is_test=True, head=None):
     # Load Data
     print('Loading data')
     load_party_mapping(party_entity_mapping_file)
-    election_data = ElectionData(dir_name)
+    election_data = ElectionData(dir_name, district_type)
     print(f'已載入 {len(election_data.candidates)} 筆候選人資料')
     print('-----------------------------')
 
-    candidates_items = prepare_candidates_items(LOGIN, election_data, district_type, election_entity_id, head)
+    items_data = prepare_candidate_items_data(SITE, election_data, district_type, election_entity.getID(), head)
 
     print('-----------------------------')
-    new_item_count = sum(1 for c in candidates_items if c.new_item)
-    modify_item_count = len(candidates_items) - new_item_count
+    new_item_count = sum(1 for (item, _) in items_data if item.getID()=='-1')
+    modify_item_count = len(items_data) - new_item_count
     print(f'新增: {new_item_count}')
     print(f'修改: {modify_item_count}')
     
@@ -284,13 +150,13 @@ def main(is_test=True, head=None):
         action = input('Action: ').upper()
         if action == 'S':
             print('開始匯入')
-            write_candidates_data(LOGIN, candidates_items)
+            write_candidates_data(SITE, items_data)
             break
         if action == 'C':
             print('取消匯入')
             break
         if action == 'L':
-            print_modifications(candidates_items)
+            print_modifications(items_data)
             continue
         if action == 'D':
             code.interact(local=dict(globals(), **locals()))
@@ -299,26 +165,55 @@ def main(is_test=True, head=None):
     code.interact(local=dict(globals(), **locals()))
 
 
-def prepare_candidates_items(login_instance, election_data, district_type, election_entity_id, head=None):
-    candidates_items = []
 
+def initialize(is_test=True):
+    global IS_TEST
+    global SITE_URL
+    global API_URL
+    global SITE
+    global Q
+    global P
+
+    IS_TEST = is_test
+    if IS_TEST:
+        SITE = TEST_WD_SITE
+        SITE_URL = TEST_WD_URL
+        API_URL = TEST_WD_API_URL
+    else:
+        SITE = WD_SITE
+        SITE_URL = WD_URL
+        API_URL = WD_API_URL
+
+    
+    # Login
+    WDPASS = os.getenv("WDPASS")
+    if WDPASS is None:
+        raise ValueError('Environment variable "WDPASS" is required.')
+
+    L = LoginManager(password=WDPASS, site=SITE)
+    success = L.login()
+    assert success
+
+    Q = ItemIds(SITE)
+    P = PropertyIds(SITE)
+
+    print(f'-------------------------')
+    print(f'User Name: {L.username}')
+    print(f'IS_TEST: {IS_TEST}')
+    print(f'-------------------------')
+
+
+def prepare_candidate_items_data(site, election_data:ElectionData, district_type, election_entity_id, head=None) -> ModificationList:
+    items_data:ModificationList = []
+
+    # For test run
     candidates = election_data.candidates.values()
     if head is not None:
         candidates = itertools.islice(candidates, head)
 
     for cand in candidates:
+        print('-----------------------------')
         print(cand)
-
-        if cand.party_id == NO_PARTY:
-            party_entity_id = None
-        else:
-            party_entity_id = entity_id_of_party[cand.party_id]
-            if IS_TEST:
-                party_entity_id = AdaptiveWDEntityEngine.get_adapted_entity_id(login_instance, party_entity_id)
-            
-            #
-            party = ItemEngine(wd_item_id=party_entity_id, core_props={})
-            print(get_zhtw_label(party))
 
         item = None
 
@@ -332,8 +227,7 @@ def prepare_candidates_items(login_instance, election_data, district_type, elect
                 label = result['label']
                 if label != cand.legal_name:
                     continue
-                found_item = ItemEngine(id, core_props={})
-                # TODO: Check equivalence
+                found_item = ItemPage(SITE, id)
                 confidence = same_person_confidence(found_item, cand)
                 if confidence >= 1:
                     result_confidences.append(confidence)
@@ -349,115 +243,246 @@ def prepare_candidates_items(login_instance, election_data, district_type, elect
                     raise ValueError('multiple results with same confidence')
                 
                 best_matched_item = best_matched_items[0]
-                print(f'best matched item: {get_zhtw_label(best_matched_item)[1]} ({best_matched_item.wd_item_id})')
-                print(f'modify item: ({SITE_URL}/wiki/{best_matched_item.wd_item_id})')
+                print(f'best matched item: {get_zhtw_label(best_matched_item)} ({best_matched_item.getID()})')
+                print(f'modify item: ({SITE_URL}/wiki/{best_matched_item.getID()})')
 
                 item = best_matched_item
 
         if item is None:
             print(f'No existing item found, create new item')
-            item = ItemEngine(new_item=True, core_props={})
-            item.set_label(cand.legal_name, 'zh-tw')
+            item = ItemPage(SITE)
+            data = {
+                'labels': LanguageDict({'zh-tw': cand.legal_name}),
+                'claims': ClaimCollection(site),
+            }
+        else:
+            data = item.get()
             
         # Set data
         # * [v] 性質 (P31) -> 人類 (Q5)
         # * [v] 國籍 (P27) -> 中華民國 (Q865)
-        # * [v] 性別 (P21) -> 男或女            (+參考文獻)
-        # * [v] Date of birth (P569)           (+參考文獻)
-        # * [v] 競選(P3602) -> 參與的選舉       (+參考文獻)
+        # * [v] 性別 (P21) -> 男或女        (+參考文獻)
+        # * [v] 出生日期 (P569)             (+參考文獻)
+        # * [v] 競選(P3602) -> 參與的選舉   (+參考文獻)
         #     * [v] 選區 (P768) -> (Item)
         #     * [v] 代表對象 (P1268) -> (Item) //推薦政黨
         #     * [v] 得票數 (P1111) -> (Quantity)
         #     * [v] 候選人號次 (P4243) -> (String)
-        # * [v] 參考文獻結構
-        #     * [v] 來源網址 (P854) : [政府資料開放平台](https://data.gov.tw/dataset/13119)
-        #     * [v] 作品或名稱語言 (P407) : 中華民國國語 (Q262828)
-        #     * [v] 檢索日期 (P813)
+        # * [ ] 參考文獻結構
+        #     * [ ] 來源網址 (P854) : [政府資料開放平台](https://data.gov.tw/dataset/13119)
+        #     * [ ] 作品或名稱語言 (P407) : 中華民國國語 (Q262828)
+        #     * [ ] 檢索日期 (P813)
 
-        references = [[
-            WDString(REFERENCE_URL, P.REFERENCE_URL, is_reference=True),
-            WDItemID(Q.NATIONAL_LANGUAGE_OF_ROC, P.LANGUAGE_OF_WORK, is_reference=True),
-            WDTime(DATA_RETRIEVED_DATE, P.RETRIEVED, WbTimePrecision.DAY, is_reference=True),
-        ]]
+        instance_of = set_claim(data['claims'], site, P.INSTANCE_OF, ItemPage(site, Q.HUMAN))
+        nationality = set_claim(data['claims'], site, P.NATIONALITY, ItemPage(site, Q.TAIWAN))
 
-        instance_of = WDItemID(Q.HUMAN, P.INSTANCE_OF)
-        nationality = WDItemID(Q.TAIWAN, P.NATIONALITY)
-        
-        # Gender
-        gender = None
         if cand.gender == Gender.MALE:
-            gender = WDItemID(Q.MALE, P.GENDER, references=references)
+            gender = set_claim(data['claims'], site, P.GENDER, ItemPage(site, Q.MALE))
         elif cand.gender == Gender.FEMALE:
-            gender = WDItemID(Q.FEMALE, P.GENDER, references=references)
+            gender = set_claim(data['claims'], site, P.GENDER, ItemPage(site, Q.FEMALE))
 
-        # Date of birth
-        birth_date_str = cand.birth_date.toTimestr(True)
-        birth_date_precision = cand.birth_date.precision
-        date_of_birth = WDTime(birth_date_str, P.DATE_OF_BIRTH, birth_date_precision, references=references)
+        # Date of birth. If our data have higher precision and have no conflict, replace the existing value
+        if P.DATE_OF_BIRTH in data['claims']:
+            date_of_birth:Claim = data['claims'][P.DATE_OF_BIRTH][0]
+            if time_match(date_of_birth.getTarget(), cand.birth_date):
+                if date_of_birth.getTarget().precision < cand.birth_date.precision:
+                    date_of_birth.setTarget(cand.birth_date)
+            else:
+                date_of_birth = set_claim(data['claims'], site, P.DATE_OF_BIRTH, cand.birth_date)
+        else:
+            date_of_birth = set_claim(data['claims'], site, P.DATE_OF_BIRTH, cand.birth_date)
 
         # Candidacy
-        candidacy_qualifiers = [
-            WDQuantity(cand.votes, P.VOTES_RECEIVED, is_qualifier=True),
-            WDString(str(cand.number), P.CANDIDATE_NUMBER, is_qualifier=True),
+        candidacy = set_claim(data['claims'], site, P.CANDIDACY, ItemPage(site, election_entity_id))
+        
+        district_item = get_district_item(site, cand.district, district_type)
+        if district_item is not None:
+            set_claim(candidacy.qualifiers, site, P.ELECTORAL_DISTRICT, district_item, is_qualifier=True)
+
+        party_item = get_party_item(site, cand.party_id)
+        if party_item is not None:
+            set_claim(candidacy.qualifiers, site, P.REPRESENTS, party_item, is_qualifier=True)
+
+        set_claim(candidacy.qualifiers, site, P.VOTES_RECEIVED, WbQuantity(cand.votes), is_qualifier=True)
+        set_claim(candidacy.qualifiers, site, P.CANDIDATE_NUMBER, cand.number, is_qualifier=True)
+
+        references = [
+            make_claim(site, P.REFERENCE_URL, REFERENCE_URL, is_reference=True),
+            make_claim(site, P.LANGUAGE_OF_WORK, ItemPage(site, Q.NATIONAL_LANGUAGE_OF_ROC), is_reference=True),
+            make_claim(site, P.RETRIEVED, DATA_RETRIEVED_TIME, is_reference=True),
         ]
 
-        if party_entity_id is None:
-            candidacy_qualifiers.append(WDItemID(None, P.REPRESENTS, is_qualifier=True, snak_type='novalue'))
+        claims_to_add_references = [gender, date_of_birth, candidacy]
+        for claim in claims_to_add_references:
+            if len(claim.sources) == 0:
+                claim.addSources(copy.deepcopy(references))
+
+        items_data.append((item,data))
+
+    return items_data
+
+
+
+def get_district_item(site:DataSite, district:District, district_type:str):
+
+    if district_type not in ELECTORAL_DISTRICT_OPTIONS:
+        raise ValueError(f'district_type should be one of {ELECTORAL_DISTRICT_OPTIONS}')
+
+    if district_type == '行政區':
+        data = [wdi_core.WDString(district.code.HRCIS_str(), MAIN_P.HRCIS_CODE)]
+        item = wdi_core.WDItemEngine(data=data, core_props={MAIN_P.HRCIS_CODE})
+        return AdaptiveEntity(site, item.wd_item_id)
+
+    elif district_type == '區域立委':
+        search_results = list(WD_SITE.search_entities(district.name, 'zh-tw', 5))
+        if len(search_results) == 0:
+            return None
+        result = search_results[0]
+        id = result['id']
+        return AdaptiveEntity(site, id)
+
+    elif district_type == '山地立委':
+        return ItemPage(Q.HIGHLAND_ABORIGINE_DISTRICT)
+
+    elif district_type == '平地立委':
+        return ItemPage(Q.LOWLAND_ABORIGINE_DISTRICT)
+
+    elif district_type == '其他':
+        return None
+
+
+
+entity_id_of_party = dict()
+def load_party_mapping(filename):
+    df = pd.read_csv(filename, header=None)
+    for row in df.iloc:
+        party_id = row[0]
+        entityId = row[1]
+        entity_id_of_party[party_id] = entityId
+
+def get_party_item(site, party_id):
+    if party_id == NO_PARTY:
+        return None
+    else:
+        party_entity_id = entity_id_of_party[party_id]
+        return AdaptiveEntity(site, party_entity_id)
+
+
+def same_person_confidence(item, cand:Candidate) -> int:
+    confidence = 1
+
+    item_label = get_zhtw_label(item)
+    if item_label != cand.legal_name:
+        return 0
+    
+    
+    if P.CBDB_ID in item.claims:
+        return 0
+
+    if P.INSTANCE_OF in item.claims:
+        if find_claim(item.claims, P.INSTANCE_OF, Q.HUMAN) is None:
+            return 0
+
+    if P.DATE_OF_BIRTH in item.claims:
+        item_birth_date = item.claims[P.DATE_OF_BIRTH][0].getTarget()
+        precision = min(item_birth_date.precision, cand.birth_date.precision)
+
+        if precision >= WbTimePrecision.YEAR and item_birth_date.year != cand.birth_date.year:
+            return 0
+        if precision >= WbTimePrecision.MONTH and item_birth_date.month != cand.birth_date.month:
+            return 0
+        if precision >= WbTimePrecision.DAY and item_birth_date.day != cand.birth_date.day:
+            return 0
+
+        confidence += (precision - WbTimePrecision.YEAR + 1)
+
+    if P.GENDER in item.claims:
+        values = [f'{claim.getTarget().getID()}' for claim in item.claims[P.GENDER]]
+
+        item_is_male = Q.MALE in values
+        item_is_female = Q.FEMALE in values
+
+        if cand.gender == Gender.MALE:
+            if item_is_male:
+                confidence += 0.5
+            if item_is_female:
+                confidence -= 0.5
+        if cand.gender == Gender.FEMALE:
+            if item_is_female:
+                confidence += 0.5
+            if item_is_male:
+                confidence -= 0.5
+
+    if P.NATIONALITY in item.claims:
+        values = [f'{claim.getTarget().getID()}' for claim in item.claims[P.NATIONALITY]]
+        if Q.TAIWAN in values:
+            confidence += 0.5
         else:
-            candidacy_qualifiers.append(WDItemID(party_entity_id, P.REPRESENTS, is_qualifier=True))
+            confidence -= 1
 
-        district_item_id = get_district_item_id(cand.district, district_type, login_instance)
-        if district_item_id is not None:
-            candidacy_qualifiers.append(WDItemID(district_item_id, P.ELECTORAL_DISTRICT, is_qualifier=True))
-            #
-            district = ItemEngine(district_item_id)
-            print(f'District: {get_zhtw_label(district)[1]} ({district_item_id})')
-        else:
-            print(f'District not found or skipped')
+    if P.OCCUPATION in item.claims:
+        for claim in item.claims[P.OCCUPATION]:
+            occupation = claim.getTarget()
+            if occupation == Q.POLITICIAN:
+                confidence += 0.5
+                break
 
-        candidacy = WDItemID(election_entity_id, P.CANDIDACY, qualifiers=candidacy_qualifiers, references=references)
+    if P.PARTY_MEMBERSHIP in item.claims:
+        confidence += 0.1
 
-        data = [instance_of, nationality, gender, date_of_birth, candidacy]
-        # TODO: correctly prevent overwriting
-        item.update(data, append_value=[P.CANDIDACY])
-        candidates_items.append(item)
+    return confidence
 
-    return candidates_items
 
-def write_candidates_data(login_instance, candidates_data):
+def write_candidates_data(site:DataSite, items_data:ModificationList):
+
     print(f'-----------------------------')
-    for item in candidates_data:
-        item.write(login_instance)
+    for (item, data) in items_data:
         
-        if item.wd_item_id != '':
-            is_new_str = '(new)' if item.new_item else ''
-            print(f'寫入： {is_new_str} {(item.wd_item_id)} ({entity_url(SITE_URL, item.wd_item_id)})')
+        _data = dict()
+        for key in data:
+            _data[key] = data[key].toJSON()
+        data = _data
+
+        is_new_str = '(new)' if item.getID()=='-1' else ''
+        result = site.editEntity(item, data)
+
+        if item.getID() != '-1':
+            print(f'寫入： {is_new_str} {(item.getID())} ({item.concept_uri()})')
         else:
             print('匯入失敗')
-        
+            print(result)
+
+        time.sleep(1)
+
         print(f'-----------------------------')
-    
-def print_modifications(candidates_items):
-    for item in candidates_items:
-        label = get_zhtw_label(item)[1]
-        if item.new_item:
+
+
+def print_modifications(items_data:ModificationList):
+    print(f'-----------------------------')
+    for (item,data) in items_data:
+        label = get_zhtw_label(item)
+        if item.getID() == '-1':
             print(f'(new) {label}')
         else:
-            print(f'(modify) {label} ({entity_url(SITE_URL, item.wd_item_id)})')
-        statements = make_statments_dict(item.statements)
-        if item_id(statements[P.GENDER][0]) == Q.MALE:
+            print(f'(modify) {label} ({item.concept_uri()})')
+
+        claims:ClaimCollection = data['claims']
+        if claims[P.GENDER][0].getTarget().getID() == Q.MALE:
             gender = '男'
-        elif item_id(statements[P.GENDER][0]) == Q.FEMALE:
+        elif claims[P.GENDER][0].getTarget().getID() == Q.FEMALE:
             gender = '女'
-        print(f'    性別: {gender} ({entity_url(SITE_URL, item_id(statements[P.GENDER][0]))})')
-        date_of_birth = statements[P.DATE_OF_BIRTH][0]
-        print(f'    出生日期: {date_of_birth.time} (precision:{WbTimePrecision(date_of_birth.precision).name})')
-        print(f'    競選: {entity_url(SITE_URL, item_id(statements[P.CANDIDACY][0]))}')
-        candidacy_qualifiers = make_statments_dict(statements[P.CANDIDACY][0].qualifiers)
-        district_item_id = None
+        print(f'    性別:       {gender} ({claims[P.GENDER][0].getTarget().concept_uri()})')
+        date_of_birth = claims[P.DATE_OF_BIRTH][0].getTarget()
+        print(f'    出生日期:   {date_of_birth.toTimestr(True)} (precision:{WbTimePrecision(date_of_birth.precision).name})')
+        print(f'    競選:       {get_zhtw_label(claims[P.CANDIDACY][0].getTarget())} ({claims[P.CANDIDACY][0].getTarget().concept_uri()})')
+
+        candidacy_qualifiers = claims[P.CANDIDACY][0].qualifiers
+        district_item = None
         if P.ELECTORAL_DISTRICT in candidacy_qualifiers:
-            district_item_id = item_id(candidacy_qualifiers[P.ELECTORAL_DISTRICT][0])
-        print(f'        選區: {entity_url(SITE_URL, district_item_id)}')
-        print(f'        政黨: {entity_url(SITE_URL, item_id(candidacy_qualifiers[P.REPRESENTS][0]))}')
-        print(f'        號次: {candidacy_qualifiers[P.CANDIDATE_NUMBER][0].value}')
-        print(f'        得票: {int(candidacy_qualifiers[P.VOTES_RECEIVED][0].value[0])}')
+            district_item = candidacy_qualifiers[P.ELECTORAL_DISTRICT][0].getTarget()
+        print(f'            選區:   {get_zhtw_label(district_item)} ({district_item.concept_uri()})')
+        print(f'            政黨:   {get_zhtw_label(candidacy_qualifiers[P.REPRESENTS][0].getTarget())} ({candidacy_qualifiers[P.REPRESENTS][0].getTarget().concept_uri()})')
+        print(f'            號次:   {candidacy_qualifiers[P.CANDIDATE_NUMBER][0].getTarget()}')
+        print(f'            得票:   {candidacy_qualifiers[P.VOTES_RECEIVED][0].getTarget().amount}')
+
+    print(f'-----------------------------')

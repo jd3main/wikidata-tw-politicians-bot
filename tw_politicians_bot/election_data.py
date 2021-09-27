@@ -2,8 +2,10 @@ import pandas as pd
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
-from typing import List
+from typing import Tuple,List,Dict
+
 from pywikibot import WbTime
+
 from .clean_df import clean_df
 from .preview import preview
 
@@ -52,7 +54,7 @@ class DistrictCode:
             return None
         return self.codes[0:2] + self.codes[3:5]
 
-    def HRCIS(self, trim=False):
+    def HRCIS(self, trim=True):
         hrcis = self._HRCIS()
         if hrcis is None:
             return None
@@ -62,9 +64,8 @@ class DistrictCode:
                     hrcis.pop()
         return hrcis
 
-
-    def HRCIS_str(self):
-        hrcis = self._HRCIS()
+    def HRCIS_str(self, trim=True):
+        hrcis = self.HRCIS(trim)
         if hrcis is None:
             return None
         return ''.join(hrcis)
@@ -115,20 +116,26 @@ def read_csv_clean(filename, **kwargs):
 
 class ElectionData():
 
-    def __init__(self, dirName, elbase='elbase.csv', elcand='elcand.csv', elctks='elctks.csv'):
-        self.dir = Path(dirName)
-
+    def __init__(self, dir_name, district_type, elbase='elbase.csv', elcand='elcand.csv', elctks='elctks.csv'):
+        self.dir = Path(dir_name)
+        self.district_type = district_type
         self.elbase = elbase
         self.elcand = elcand
         self.elctks = elctks
+        
+        self.candidates:Dict[Tuple[str,str],Candidate] = None
 
         self.load_districts()
         self.load_candidates()
         self.load_votes()
+        
 
     def load_districts(self):
         header = ['省市','縣市','選區','鄉鎮市區','村里','名稱']
         df = read_csv_clean(self.dir/self.elbase, names=header, dtype=str)
+
+        if self.district_type == '行政區':
+            df['選區'] = '00'
 
         self.districts = dict()
         for row in df.iloc:
@@ -140,6 +147,9 @@ class ElectionData():
         header = ['省市','縣市','選區','鄉鎮市區','村里','號次','名字','政黨編號','性別','出生日期','年齡','出生地','學歷','現任','當選註記','副手']
         df = read_csv_clean(self.dir/self.elcand, names=header, dtype=str)
         df = df.astype({'性別':int}, copy=False)
+
+        if self.district_type == '行政區':
+            df['選區'] = '00'
 
         self.candidates = dict()
         for row in df.iloc:
@@ -158,6 +168,11 @@ class ElectionData():
         header = ['省市','縣市','選區','鄉鎮市區','村里','投開票所','號次','得票數','得票率','當選註記']
         df = read_csv_clean(self.dir/self.elctks, names=header, dtype=str)
         df = df.astype({'得票數':int}, copy=False)
+
+
+        if self.district_type == '行政區' and (df['選區'] == '01').all():
+            df['選區'] = '00'
+
         full_district_code = df[header[0]].str.cat(df[header[1:5]])
         df.insert(0, 'FullDistrictCode', full_district_code)
         main_district_codes = [key[0] for key in self.candidates.keys()]

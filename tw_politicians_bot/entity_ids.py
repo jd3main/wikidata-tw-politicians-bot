@@ -1,23 +1,24 @@
 import os
 import pickle
 
-from .adaptive_entity_engine import AdaptiveWDEntityEngine
+from .adaptive_entity import AdaptiveEntity
+
 
 
 class EntityIds():
 
-    def __init__(self, login_instance=None):
-        self.login_instance = login_instance
+    def __init__(self, site):
+        self.site = site
         self.adapt()
 
     def adapt(self):
-        if self.login_instance is not None:
-            for field in self.constant_fields():
+        if self.site.sitename != 'wikidata:wikidata':
+            for field in self.get_constant_fields():
                 main_id = getattr(self, field)
-                test_id = AdaptiveWDEntityEngine.get_adapted_entity_id(self.login_instance, main_id)
+                test_id = AdaptiveEntity(self.site, main_id).getID()
                 setattr(self, field, test_id)
 
-    def constant_fields(self):
+    def get_constant_fields(self):
         return [f for f in dir(self.__class__) if f.isupper()]
 
 
