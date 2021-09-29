@@ -131,3 +131,6 @@ apicache-py3/
 
 # This project
 votedata/
+pywikibot.lwp
+entity_ids_cache.csv
+throttle.ctrl

@@ -2,12 +2,11 @@ import pandas as pd
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
-from typing import Tuple,List,Dict
+from typing import Tuple,Dict
 
 from pywikibot import WbTime
 
 from .clean_df import clean_df
-from .preview import preview
 
 
 def parse_birth_date(birth_str:str) -> WbTime:
@@ -29,6 +28,9 @@ class DistrictCode:
         self.codes = codes
         self.normalize()
             
+    def __str__(self):
+        return ''.join(self.codes)
+
     def normalize(self):
         if self.codes == ['00','000','01','000','0000']:
             self.codes[2] = '00'
@@ -48,30 +50,21 @@ class DistrictCode:
     def village(self):
         return self.codes[4]
 
-
-    def _HRCIS(self):
+    @property
+    def HRCIS(self):
         if not self.village()[0].isnumeric():
             return None
-        return self.codes[0:2] + self.codes[3:5]
-
-    def HRCIS(self, trim=True):
-        hrcis = self._HRCIS()
-        if hrcis is None:
-            return None
-        if trim:
-            for i in range(3):
-                if all(c=='0' for c in hrcis[-1]):
-                    hrcis.pop()
+        hrcis = self.codes[0:2] + self.codes[3:5]
+        while len(hrcis) > 0 and all(c=='0' for c in hrcis[-1]):
+            hrcis.pop()
         return hrcis
 
-    def HRCIS_str(self, trim=True):
-        hrcis = self.HRCIS(trim)
+    @property
+    def HRCIS_str(self):
+        hrcis = self.HRCIS
         if hrcis is None:
             return None
         return ''.join(hrcis)
-
-    def __str__(self):
-        return ''.join(self.codes)
 
 
 @dataclass
@@ -188,11 +181,3 @@ class ElectionData():
 
             cand = self.candidates[(code,number)]
             cand.votes = votes
-
-
-if __name__ == '__main__':
-    election_data = ElectionData('./votedata/20120114-總統及立委/區域立委')
-
-    preview(election_data.districts)
-    print()
-    preview(election_data.candidates)
