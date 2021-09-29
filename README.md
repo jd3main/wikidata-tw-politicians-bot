@@ -13,8 +13,12 @@ A bot for importing data of Taiwanese politicians into Wikidata
 
 ```
 cd wikidata-tw-politicians-bot
-$Env:WDUSER = "your_user_name"
 $Env:WDPASS = "your_password"
-python .\main.py -t <TEST> -n <N>
+python main.py -t <TEST> -n <N> -s <SLEEP>
+```
+
+To see meaning of the arguments:
+```
+python main.py -h
 ```
 

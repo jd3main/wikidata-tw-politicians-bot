@@ -1,0 +1,3 @@
+pandas>=1.2.4
+pywikibot>=6.6.1
+wikidataintegrator>=0.9.12

@@ -1,7 +1,6 @@
 from enum import IntEnum
 import re
 
-from wikidataintegrator import wdi_core
 from pywikibot import WbTime
 
 
@@ -12,7 +11,7 @@ class WbTimePrecision(IntEnum):
 
     @staticmethod
     def from_str(s:str):
-        y,m,d = re.match(re.match(WB_TIME_REGEX, s).group(1,2,3))
+        y, m, d = re.match(re.match(WB_TIME_REGEX, s).group(1, 2, 3))
         if int(d) != 0:
             return WbTimePrecision.DAY
         if int(m) != 0:
@@ -20,11 +19,8 @@ class WbTimePrecision(IntEnum):
         return WbTimePrecision.YEAR
 
 
-
 WB_TIME_REGEX = r"([-+]?\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)Z"
 
-def time_wdi_to_pwb(wdi_time:wdi_core.WDTime):
-    return WbTime.fromTimestr(wdi_time.time, precision=wdi_time.precision)
 
 def time_match(time1:WbTime, time2:WbTime):
     precision = min(time1.precision, time2.precision)
@@ -35,5 +31,3 @@ def time_match(time1:WbTime, time2:WbTime):
     if precision >= WbTimePrecision.DAY and time1.day != time2.day:
         return False
     return True
-        
-
