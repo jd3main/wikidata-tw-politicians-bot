@@ -1,5 +1,6 @@
 # wikidata-tw-politicians-bot
 A bot for importing data of Taiwanese politicians into Wikidata
+這個 bot 是用來把選舉資料庫中的候選人資料倒入 Wikidata
 
 ## Data source
 
@@ -9,6 +10,8 @@ A bot for importing data of Taiwanese politicians into Wikidata
 
 ## Usage
 
+先從[這個連結](http://data.cec.gov.tw/選舉資料庫/votedata.zip)下載檔案，解壓縮到根目錄
+
 ### PowerShell
 
 ```
@@ -17,7 +20,7 @@ $Env:WDPASS = "your_password"
 python main.py -t <TEST> -n <N> -s <SLEEP>
 ```
 
-To see meaning of the arguments:
+查看參數說明：
 ```
 python main.py -h
 ```
